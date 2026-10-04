@@ -1,0 +1,328 @@
+#!/usr/bin/env bash
+# bin/setup — install/remove skills & agents for Claude Code, Codex, opencode.
+#
+# Usage:
+#   ./bin/setup                       # install for every detected CLI
+#   ./bin/setup --cli=opencode        # install for one CLI only (comma-separated)
+#   ./bin/setup --link                # use symlinks instead of copies
+#   ./bin/setup --dry-run             # print what would happen, change nothing
+#   ./bin/setup --uninstall           # remove previously installed links/copies
+#   ./bin/setup --uninstall --dry-run # preview uninstall
+#
+# Behavior:
+#   - Scans ./skills/<name>/<cli>/ for SKILL.md and copies/symlinks them into
+#     each CLI's expected directory.
+#   - Scans ./agents/<name>/<cli>/ for the CLI's agent file and installs it.
+#   - Idempotent: if a destination already points to a path inside this repo,
+#     it is left alone; otherwise it is replaced (with a warning in non-dry-run).
+#   - Tracks installed paths in ./.setup-state/installed.tsv so --uninstall
+#     removes exactly what was created.
+
+set -euo pipefail
+
+# ---- args ---------------------------------------------------------------
+MODE="install"            # install | uninstall
+LINK_MODE="copy"          # copy | symlink
+DRY_RUN=0
+CLI_FILTER=""             # empty = auto-detect all installed CLIs
+DEST_OVERRIDE=""          # optional, e.g. --dest=opencode=~/custom/path
+
+for arg in "$@"; do
+  case "$arg" in
+    --install)            MODE="install" ;;
+    --uninstall)          MODE="uninstall" ;;
+    --link)               LINK_MODE="symlink" ;;
+    --copy)               LINK_MODE="copy" ;;
+    --dry-run|-n)         DRY_RUN=1 ;;
+    --cli=*)              CLI_FILTER="${arg#--cli=}" ;;
+    --dest=*)             DEST_OVERRIDE="${arg#--dest=}" ;;
+    -h|--help)
+      sed -n '2,18p' "$0"
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $arg" >&2
+      exit 2
+      ;;
+  esac
+done
+
+# ---- paths --------------------------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SKILLS_DIR="$REPO_ROOT/skills"
+AGENTS_DIR="$REPO_ROOT/agents"
+STATE_DIR="$REPO_ROOT/.setup-state"
+STATE_FILE="$STATE_DIR/installed.tsv"
+
+mkdir -p "$STATE_DIR"
+[[ -f "$STATE_FILE" ]] || : > "$STATE_FILE"
+
+# ---- logging ------------------------------------------------------------
+say()  { printf '%s\n' "$*"; }
+warn() { printf 'warn: %s\n' "$*" >&2; }
+err()  { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+run() {
+  # Run a command unless --dry-run.
+  if [[ $DRY_RUN -eq 1 ]]; then
+    printf '  (dry-run) %s\n' "$*"
+  else
+    eval "$@"
+  fi
+}
+
+# ---- destination resolver ----------------------------------------------
+# Output two lines:
+#   <skills_root>
+#   <agents_root>
+# Or exit non-zero if the CLI is not installed / not requested.
+resolve_dest() {
+  local cli="$1"
+
+  # Allow caller to skip with --cli filter.
+  if [[ -n "$CLI_FILTER" ]]; then
+    local IFS=','
+    local wanted=0
+    local f
+    for f in $CLI_FILTER; do
+      if [[ "$f" == "$cli" ]]; then wanted=1; break; fi
+    done
+    [[ $wanted -eq 1 ]] || return 1
+  fi
+
+  local skills_root="" agents_root=""
+  case "$cli" in
+    claude-code)
+      local base="${CLAUDE_HOME:-$HOME/.claude}"
+      skills_root="$base/skills"
+      agents_root="$base/agents"
+      [[ -d "$base" ]] || return 1
+      ;;
+    codex)
+      local base="${CODEX_HOME:-$HOME/.codex}"
+      skills_root="$base/skills"
+      agents_root="$base/agents"
+      [[ -d "$base" || -d "${CODEX_HOME:-$HOME/.agents}" ]] || return 1
+      # Codex also reads ~/.agents/skills; we install into both when $CLIC is global.
+      ;;
+    opencode)
+      local base="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
+      skills_root="$base/skills"
+      agents_root="$base/agents"
+      [[ -d "$base" ]] || return 1
+      ;;
+    *)
+      warn "unknown CLI: $cli"
+      return 1
+      ;;
+  esac
+
+  # Per-CLI dest override.
+  if [[ -n "$DEST_OVERRIDE" ]]; then
+    local pair
+    pair=$(printf '%s' "$DEST_OVERRIDE" | awk -F= -v c="$cli" '
+      { for (i=1; i<=NF; i++) if ($i ~ "^"c"=") { sub("^"c"=", "", $i); print $i; exit } }
+    ')
+    if [[ -n "$pair" ]]; then
+      skills_root="$pair/skills"
+      agents_root="$pair/agents"
+    fi
+  fi
+
+  printf '%s\n%s\n' "$skills_root" "$agents_root"
+}
+
+# Detect which CLIs to target.
+detect_clis() {
+  local clis=()
+  for cli in claude-code codex opencode; do
+    if resolve_dest "$cli" >/dev/null 2>&1; then
+      clis+=("$cli")
+    fi
+  done
+  printf '%s\n' "${clis[@]}"
+}
+
+# ---- filesystem helpers -------------------------------------------------
+is_inside_repo() {
+  local path="$1"
+  case "$path" in
+    "$REPO_ROOT"/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+ensure_dir() {
+  if [[ $DRY_RUN -eq 1 ]]; then
+    printf '  (dry-run) mkdir -p %q\n' "$1"
+  else
+    mkdir -p "$1"
+  fi
+}
+
+# Place a file at $dest_path, either by copying $src_path or symlinking it.
+# Existing dest is removed unless it already points into this repo.
+install_file() {
+  local src_path="$1" dest_path="$2" cli="$3" entry="$4"
+
+  ensure_dir "$(dirname "$dest_path")"
+
+  if [[ -L "$dest_path" || -e "$dest_path" ]]; then
+    local current
+    current="$(readlink -f -- "$dest_path" 2>/dev/null || true)"
+    if [[ "$current" == "$(readlink -f -- "$src_path")" ]]; then
+      say "  ok  $cli: $entry"
+      return 0
+    fi
+    if is_inside_repo "$current"; then
+      # Points somewhere else in this repo — leave it.
+      warn "$cli: $entry already installed from a different path: $current"
+      return 0
+    fi
+    warn "$cli: replacing existing $dest_path"
+    run rm -rf -- "$dest_path"
+  fi
+
+  if [[ $LINK_MODE == symlink ]]; then
+    run ln -s -- "$src_path" "$dest_path"
+  else
+    run cp -- "$src_path" "$dest_path"
+  fi
+
+  if [[ $DRY_RUN -eq 0 ]]; then
+    printf '%s\t%s\n' "$cli" "$dest_path" >> "$STATE_FILE"
+  fi
+  say "  +  $cli: $entry"
+}
+
+# Recursively install a directory: copies/symlinks every file under $src_dir
+# into the matching path under $dest_dir, preserving relative layout.
+install_tree() {
+  local src_dir="$1" dest_dir="$2" cli="$3" entry="$4"
+
+  [[ -d "$src_dir" ]] || { warn "skip $entry ($cli): missing $src_dir"; return 0; }
+
+  if [[ $LINK_MODE == symlink ]]; then
+    # For symlinks, the cleanest approach is a symlink at the parent: any
+    # file the CLI opens will follow the link back to this repo.
+    ensure_dir "$(dirname "$dest_dir")"
+    if [[ -L "$dest_dir" || -e "$dest_dir" ]]; then
+      local current
+      current="$(readlink -f -- "$dest_dir" 2>/dev/null || true)"
+      if [[ "$current" == "$src_dir" ]]; then
+        say "  ok  $cli: $entry"
+        return 0
+      fi
+      if is_inside_repo "$current"; then
+        warn "$cli: $entry already installed from $current"
+        return 0
+      fi
+      warn "$cli: replacing existing $dest_dir"
+      run rm -rf -- "$dest_dir"
+    fi
+    run ln -s -- "$src_dir" "$dest_dir"
+    if [[ $DRY_RUN -eq 0 ]]; then
+      printf '%s\t%s\n' "$cli" "$dest_dir" >> "$STATE_FILE"
+    fi
+    say "  +  $cli: $entry (symlinked)"
+  else
+    # install_file ensures $dest_dir (via dirname on its first file) and any
+    # nested subdirectories. mkdir -p is idempotent, so there's no harm in
+    # letting each file install its own parent dir.
+    local f rel
+    while IFS= read -r -d '' f; do
+      rel="${f#"$src_dir"/}"
+      install_file "$f" "$dest_dir/$rel" "$cli" "$entry/$rel"
+    done < <(find "$src_dir" -type f -print0)
+  fi
+}
+
+# ---- installer ----------------------------------------------------------
+do_install() {
+  local cli skills_root agents_root
+  while IFS= read -r cli; do
+    [[ -z "$cli" ]] && continue
+    dests="$(resolve_dest "$cli")"
+    skills_root="$(printf '%s\n' "$dests" | sed -n '1p')"
+    agents_root="$(printf '%s\n' "$dests" | sed -n '2p')"
+
+    say ""
+    say "[$cli] skills -> $skills_root"
+    say "[$cli] agents -> $agents_root"
+
+    # Skills: each skills/<skill>/<cli>/ -> <skills_root>/<skill>/
+    if [[ -d "$SKILLS_DIR" ]]; then
+      local skill_dir cli_dir name
+      while IFS= read -r -d '' skill_dir; do
+        name="$(basename "$skill_dir")"
+        cli_dir="$skill_dir/$cli"
+        [[ -d "$cli_dir" ]] || continue
+        install_tree "$cli_dir" "$skills_root/$name" "$cli" "skills/$name"
+      done < <(find "$SKILLS_DIR" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
+    fi
+
+    # Agents: each agents/<agent>/<cli>/ -> <agents_root>/<agent>/
+    if [[ -d "$AGENTS_DIR" ]]; then
+      local agent_dir cli_dir name
+      while IFS= read -r -d '' agent_dir; do
+        name="$(basename "$agent_dir")"
+        cli_dir="$agent_dir/$cli"
+        [[ -d "$cli_dir" ]] || continue
+        install_tree "$cli_dir" "$agents_root/$name" "$cli" "agents/$name"
+      done < <(find "$AGENTS_DIR" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
+    fi
+  done < <(detect_clis)
+
+  if [[ $DRY_RUN -eq 1 ]]; then
+    say ""
+    say "Dry-run complete. No changes were made."
+  else
+    say ""
+    say "Done. Installed paths are tracked in $STATE_FILE."
+    say "Re-run with --uninstall to remove."
+  fi
+}
+
+do_uninstall() {
+  if [[ ! -s "$STATE_FILE" ]]; then
+    say "Nothing to uninstall (no state file)."
+    return 0
+  fi
+
+  say "Removing previously installed paths:"
+  local cli path
+  while IFS=$'\t' read -r cli path; do
+    [[ -z "$path" ]] && continue
+    if [[ -L "$path" ]]; then
+      run rm -f -- "$path"
+      say "  -  $path"
+    elif [[ -e "$path" ]]; then
+      # Only remove if it's still under our repo (defensive).
+      local target
+      target="$(readlink -f -- "$path" 2>/dev/null || true)"
+      if is_inside_repo "$target"; then
+        run rm -f -- "$path"
+        say "  -  $path"
+      else
+        warn "skip $path: no longer points into $REPO_ROOT"
+      fi
+    fi
+  done < "$STATE_FILE"
+
+  if [[ $DRY_RUN -eq 0 ]]; then
+    : > "$STATE_FILE"
+    say ""
+    say "Uninstall complete."
+  else
+    say ""
+    say "Dry-run complete. State file preserved."
+  fi
+}
+
+# ---- main ---------------------------------------------------------------
+case "$MODE" in
+  install)   do_install   ;;
+  uninstall) do_uninstall ;;
+  *) err "unknown mode: $MODE" ;;
+esac
