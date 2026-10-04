@@ -1,8 +1,44 @@
 # AI Workflow Repository
 
 This repo is a personal collection of reusable **skills** and **agents** for
-AI coding CLIs. It targets three tools, each of which has its own conventions
-for how skills and agents are discovered and invoked:
+AI coding CLIs. Think of it as a set of recipes — small, opinionated, kept
+under version control.
+
+This repo is **public**. Treat everything in it as world-readable.
+
+## Rule for AI agents and human contributors: no secrets, no personal data
+
+When editing, generating, or committing anything in this repo:
+
+- **Never commit** API keys, tokens, passwords, private keys, webhooks with
+  secrets, `.env` files with real values, internal hostnames, IPs, or
+  machine-specific absolute paths (`/home/<user>/...`).
+- **Never commit** personal email addresses, phone numbers, or other
+  identifying info unless the user has explicitly asked for it in the
+  current conversation.
+- In examples and scripts, reference secrets via env vars
+  (`api_key="${MY_API_KEY:?…}"`), never literal values.
+- If you accidentally stage a secret, **stop** and tell the user before
+  committing. Do not run `git commit` on it.
+
+Quick patterns to flag:
+`ghp_`/`gho_`/`ghs_`/`ghu_` (GitHub), `sk-`/`sk-proj-` (OpenAI/Anthropic),
+`xoxb-`/`xoxp-` (Slack), `AIza…` (Google), `AKIA…` (AWS), `-----BEGIN … PRIVATE
+KEY-----`, and any long alphanumeric string adjacent to words like
+`key`/`secret`/`token`/`password`.
+
+An optional pre-commit scanner lives at `bin/check-secrets` — opt in with:
+
+```bash
+ln -s ../../bin/check-secrets .git/hooks/pre-commit
+```
+
+---
+
+## What this repo is
+
+It targets three tools, each of which has its own conventions for how skills
+and agents are discovered and invoked:
 
 | CLI            | Skills dir                                            | Agents / subagents dir                       |
 | -------------- | ----------------------------------------------------- | -------------------------------------------- |
