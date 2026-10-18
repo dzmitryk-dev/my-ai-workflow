@@ -199,6 +199,7 @@ test_dry_run_changes_nothing() {
   assert_contains "$WORLD/output" '(dry-run)'
   assert_not_contains "$WORLD/calls.log" 'plugin add'
   assert_not_contains "$WORLD/calls.log" 'plugin marketplace add'
+  [[ ! -e "$WORLD/repo/.setup-state" ]] || fail 'dry-run created setup-state directory in a fresh repo'
   [[ ! -s "$WORLD/repo/.setup-state/superpowers.tsv" ]] || fail 'dry-run wrote plugin ownership state'
   [[ ! -s "$FAKE_CODEX_MARKETPLACES" && ! -s "$FAKE_CODEX_PLUGINS" && ! -s "$FAKE_OPENCODE_PLUGINS" ]] || fail 'dry-run changed fake manager state'
 }

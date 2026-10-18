@@ -57,8 +57,10 @@ STATE_FILE="$STATE_DIR/installed.tsv"
 SUPERPOWERS_STATE_FILE="$STATE_DIR/superpowers.tsv"
 SUPERPOWERS_MANIFEST="$REPO_ROOT/integrations/superpowers.env"
 
-mkdir -p "$STATE_DIR"
-[[ -f "$STATE_FILE" ]] || : > "$STATE_FILE"
+if [[ $DRY_RUN -eq 0 ]]; then
+  mkdir -p "$STATE_DIR"
+  [[ -f "$STATE_FILE" ]] || : > "$STATE_FILE"
+fi
 
 # ---- logging ------------------------------------------------------------
 say()  { printf '%s\n' "$*"; }
