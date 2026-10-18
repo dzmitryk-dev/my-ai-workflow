@@ -54,6 +54,8 @@ SKILLS_DIR="$REPO_ROOT/skills"
 AGENTS_DIR="$REPO_ROOT/agents"
 STATE_DIR="$REPO_ROOT/.setup-state"
 STATE_FILE="$STATE_DIR/installed.tsv"
+SUPERPOWERS_STATE_FILE="$STATE_DIR/superpowers.tsv"
+SUPERPOWERS_MANIFEST="$REPO_ROOT/integrations/superpowers.env"
 
 mkdir -p "$STATE_DIR"
 [[ -f "$STATE_FILE" ]] || : > "$STATE_FILE"
@@ -238,6 +240,378 @@ install_tree() {
   fi
 }
 
+# ---- global Superpowers plugins ----------------------------------------
+cli_selected() {
+  local wanted="$1"
+  [[ -z "$CLI_FILTER" ]] && return 0
+  local IFS=',' cli
+  for cli in $CLI_FILTER; do
+    [[ "$cli" == "$wanted" ]] && return 0
+  done
+  return 1
+}
+
+plugin_run() {
+  # Run a native CLI command without eval; in dry-run only display it.
+  if [[ $DRY_RUN -eq 1 ]]; then
+    printf '  (dry-run)'
+    printf ' %q' "$@"
+    printf '\n'
+  else
+    "$@"
+  fi
+}
+
+plugin_state_has() {
+  local record="$1"
+  [[ -f "$SUPERPOWERS_STATE_FILE" ]] && grep -Fqx -- "$record" "$SUPERPOWERS_STATE_FILE"
+}
+
+plugin_state_add() {
+  local record="$1"
+  [[ $DRY_RUN -eq 1 ]] && return 0
+  mkdir -p "$STATE_DIR"
+  : >> "$SUPERPOWERS_STATE_FILE"
+  plugin_state_has "$record" || printf '%s\n' "$record" >> "$SUPERPOWERS_STATE_FILE"
+}
+
+codex_marketplace_identity() {
+  # Print one of: absent, matching, conflict, unknown. The list command does
+  # not expose the Git ref on every Codex version, so the native add --json
+  # result is authoritative for whether the configured source is already
+  # installed at the requested ref.
+  local output
+  if ! output="$(codex plugin marketplace list --json 2>/dev/null)"; then
+    return 2
+  fi
+  printf '%s' "$output" | python3 -c '
+import json, os, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    print("unknown")
+    raise SystemExit
+name = os.environ["SUPERPOWERS_CODEX_MARKETPLACE"]
+want_url = os.environ["SUPERPOWERS_REPOSITORY"]
+if want_url.endswith(".git"):
+    want_url = want_url[:-4]
+want_url = want_url.rstrip("/")
+want_ref = os.environ["SUPERPOWERS_REF"]
+items = data.get("marketplaces", []) if isinstance(data, dict) else []
+for item in items:
+    if not isinstance(item, dict) or item.get("name") != name:
+        continue
+    source = item.get("marketplaceSource") or item.get("source")
+    url = ref = None
+    if isinstance(source, dict):
+        url = source.get("url") or source.get("source") or source.get("repository")
+        ref = source.get("ref") or item.get("ref")
+    elif isinstance(source, str):
+        url = source
+        ref = item.get("ref")
+    if not url:
+        print("unknown")
+        break
+    if "#" in url:
+        url, inline_ref = url.rsplit("#", 1)
+        ref = ref or inline_ref
+    if url.endswith(".git"):
+        url = url[:-4]
+    url = url.rstrip("/")
+    print("matching" if url == want_url and (ref is None or ref == want_ref) else "conflict")
+    break
+else:
+    print("absent")
+'
+}
+
+codex_marketplace_add_result() {
+  printf '%s' "$1" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    name = data["marketplaceName"]
+    already_added = data["alreadyAdded"]
+    if not isinstance(name, str) or not isinstance(already_added, bool):
+        raise ValueError("invalid marketplace add response")
+except Exception:
+    raise SystemExit(1)
+print(name + "\t" + ("true" if already_added else "false"))
+'
+}
+
+codex_marketplace_present() {
+  local marketplace_name="$1" output
+  if ! output="$(codex plugin marketplace list --json 2>/dev/null)"; then
+    return 2
+  fi
+  printf '%s' "$output" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(2)
+name = sys.argv[1]
+for item in data.get("marketplaces", []) if isinstance(data, dict) else []:
+    if isinstance(item, dict) and item.get("name") == name:
+        raise SystemExit(0)
+raise SystemExit(1)
+' "$marketplace_name"
+}
+
+codex_plugin_id_present() {
+  local plugin_name="$1" marketplace_name="$2"
+  local output
+  if ! output="$(codex plugin list --json 2>/dev/null)"; then
+    return 2
+  fi
+  printf '%s' "$output" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(2)
+name, marketplace = sys.argv[1:]
+for item in data.get("installed", []) if isinstance(data, dict) else []:
+    if not isinstance(item, dict):
+        continue
+    plugin = item.get("name") or item.get("plugin") or item.get("id")
+    market = item.get("marketplace") or item.get("marketplaceName")
+    if (plugin == name and market == marketplace) or plugin == name + "@" + marketplace:
+        raise SystemExit(0)
+raise SystemExit(1)
+' "$plugin_name" "$marketplace_name"
+}
+
+codex_plugin_present() {
+  codex_plugin_id_present "$SUPERPOWERS_CODEX_PLUGIN" "$SUPERPOWERS_CODEX_MARKETPLACE"
+}
+
+opencode_plugin_spec_present() {
+  local spec="$1" package_name="$2"
+  local output
+  if ! output="$(opencode plugin list 2>/dev/null)"; then
+    return 2
+  fi
+  # The list is human-readable rather than structured. Match either the
+  # configured package spec or its package name as a distinct token.
+  grep -Fq -- "$spec" <<< "$output" || \
+    grep -Eq -- "(^|[[:space:]])${package_name}([[:space:]]|$)" <<< "$output"
+}
+
+opencode_plugin_present() {
+  opencode_plugin_spec_present "$SUPERPOWERS_OPENCODE_SPEC" "$SUPERPOWERS_CODEX_PLUGIN"
+}
+
+do_superpowers_install() {
+  [[ -f "$SUPERPOWERS_MANIFEST" ]] || { warn "skip Superpowers plugins: missing $SUPERPOWERS_MANIFEST"; return 0; }
+  # This manifest is maintained in-repository and contains only public source
+  # coordinates; do not load any machine-specific configuration here.
+  # shellcheck disable=SC1090
+  source "$SUPERPOWERS_MANIFEST"
+  : "${SUPERPOWERS_REPOSITORY:?missing repository in $SUPERPOWERS_MANIFEST}"
+  : "${SUPERPOWERS_REF:?missing ref in $SUPERPOWERS_MANIFEST}"
+  : "${SUPERPOWERS_CODEX_MARKETPLACE:?missing marketplace in $SUPERPOWERS_MANIFEST}"
+  : "${SUPERPOWERS_CODEX_PLUGIN:?missing plugin in $SUPERPOWERS_MANIFEST}"
+  SUPERPOWERS_OPENCODE_SPEC="git+${SUPERPOWERS_REPOSITORY}#${SUPERPOWERS_REF}"
+  export SUPERPOWERS_REPOSITORY SUPERPOWERS_REF SUPERPOWERS_CODEX_MARKETPLACE SUPERPOWERS_CODEX_PLUGIN
+
+  if cli_selected codex && command -v codex >/dev/null 2>&1; then
+    say "[codex] Superpowers plugin"
+    local market_status marketplace_output marketplace_result marketplace_name already_added
+    if ! market_status="$(codex_marketplace_identity)"; then
+      warn "codex: cannot inspect marketplaces; skipping Superpowers install"
+      market_status="failed"
+    elif [[ "$market_status" == conflict ]]; then
+      warn "codex: marketplace '$SUPERPOWERS_CODEX_MARKETPLACE' conflicts with the pinned Superpowers source; leaving it untouched"
+      market_status="failed"
+    elif [[ $DRY_RUN -eq 1 ]]; then
+      plugin_run codex plugin marketplace add "$SUPERPOWERS_REPOSITORY" --ref "$SUPERPOWERS_REF" --json
+      market_status="ready"
+    elif marketplace_output="$(codex plugin marketplace add "$SUPERPOWERS_REPOSITORY" --ref "$SUPERPOWERS_REF" --json 2>&1)"; then
+      if ! marketplace_result="$(codex_marketplace_add_result "$marketplace_output")"; then
+        warn "codex: could not parse marketplace add result; leaving marketplace ownership untracked"
+        market_status="failed"
+      else
+        IFS=$'\t' read -r marketplace_name already_added <<< "$marketplace_result"
+        if [[ "$marketplace_name" != "$SUPERPOWERS_CODEX_MARKETPLACE" ]]; then
+          if [[ "$already_added" == false ]]; then
+            plugin_run codex plugin marketplace remove "$marketplace_name"
+          fi
+          warn "codex: pinned source resolved to marketplace '$marketplace_name', expected '$SUPERPOWERS_CODEX_MARKETPLACE'; skipping plugin install"
+          market_status="failed"
+        else
+          market_status="ready"
+          if [[ "$already_added" == false ]]; then
+            plugin_state_add $'codex-marketplace\t'"$SUPERPOWERS_CODEX_MARKETPLACE"
+          fi
+        fi
+      fi
+    else
+      warn "codex: failed to register the pinned Superpowers marketplace; skipping plugin install"
+      market_status="failed"
+    fi
+
+    if [[ "$market_status" == ready ]]; then
+      local plugin_status
+      if codex_plugin_present; then
+        :
+      else
+        plugin_status=$?
+        if [[ $plugin_status -eq 2 ]]; then
+          warn "codex: cannot inspect installed plugins; skipping Superpowers plugin install"
+        else
+          plugin_run codex plugin add "${SUPERPOWERS_CODEX_PLUGIN}@${SUPERPOWERS_CODEX_MARKETPLACE}"
+          plugin_state_add $'codex-plugin\t'"$SUPERPOWERS_CODEX_PLUGIN"$'\t'"$SUPERPOWERS_CODEX_MARKETPLACE"
+        fi
+      fi
+    fi
+  fi
+
+  if cli_selected opencode && command -v opencode >/dev/null 2>&1; then
+    say "[opencode] Superpowers plugin"
+    local open_status
+    if opencode_plugin_present; then
+      :
+    else
+      open_status=$?
+      if [[ $open_status -eq 2 ]]; then
+        warn "opencode: cannot inspect installed plugins; skipping Superpowers install"
+      else
+        plugin_run opencode plugin add "$SUPERPOWERS_OPENCODE_SPEC"
+        plugin_state_add $'opencode-plugin\t'"$SUPERPOWERS_OPENCODE_SPEC"$'\t'"$SUPERPOWERS_CODEX_PLUGIN"
+      fi
+    fi
+  fi
+}
+
+do_superpowers_uninstall() {
+  [[ -s "$SUPERPOWERS_STATE_FILE" ]] || return 0
+  local temp="$SUPERPOWERS_STATE_FILE.tmp.$$"
+  : > "$temp"
+  local kind a b keep pass installed_output status
+  # Remove owned plugins before marketplaces so we can safely preserve a
+  # marketplace that another installed plugin still references.
+  for pass in plugins marketplaces other; do
+    while IFS=$'\t' read -r kind a b; do
+      [[ -n "$kind" ]] || continue
+      keep=0
+      case "$kind" in
+        codex-plugin)
+          [[ "$pass" == plugins ]] || continue
+          if ! cli_selected codex; then keep=1
+          elif command -v codex >/dev/null 2>&1; then
+            if codex_plugin_id_present "$a" "$b"; then
+              plugin_run codex plugin remove "$a@$b"
+              say "  -  codex plugin $a@$b"
+            else
+              status=$?
+              if [[ $status -eq 2 ]]; then
+                warn "skip owned Codex plugin $a@$b: cannot inspect installed plugins"
+                keep=1
+              fi
+            fi
+          else
+            warn "skip owned Codex plugin $a@$b: codex CLI is unavailable"
+            keep=1
+          fi
+          ;;
+        opencode-plugin)
+          [[ "$pass" == plugins ]] || continue
+          if ! cli_selected opencode; then keep=1
+          elif command -v opencode >/dev/null 2>&1; then
+            if opencode_plugin_spec_present "$a" "$b"; then
+              plugin_run opencode plugin remove "$a"
+              say "  -  opencode plugin $a"
+            else
+              status=$?
+              if [[ $status -eq 2 ]]; then
+                warn "skip owned OpenCode plugin $a: cannot inspect installed plugins"
+                keep=1
+              fi
+            fi
+          else
+            warn "skip owned OpenCode plugin $a: opencode CLI is unavailable"
+            keep=1
+          fi
+          ;;
+        codex-marketplace)
+          [[ "$pass" == marketplaces ]] || continue
+          if ! cli_selected codex; then keep=1
+          elif ! command -v codex >/dev/null 2>&1; then
+            warn "skip owned Codex marketplace $a: codex CLI is unavailable"
+            keep=1
+          else
+            if codex_marketplace_present "$a"; then
+              if ! installed_output="$(codex plugin list --json 2>/dev/null)"; then
+                warn "skip owned Codex marketplace $a: cannot inspect installed plugins"
+                keep=1
+              elif printf '%s' "$installed_output" | python3 -c '
+import json, sys
+try: data = json.load(sys.stdin)
+except Exception: raise SystemExit(2)
+market, state_path, dry_run = sys.argv[1:]
+owned = set()
+if dry_run == "1":
+    try:
+        with open(state_path, encoding="utf-8") as state:
+            for line in state:
+                fields = line.rstrip("\n").split("\t")
+                if len(fields) >= 3 and fields[0] == "codex-plugin":
+                    owned.add(fields[1] + "@" + fields[2])
+    except FileNotFoundError:
+        pass
+for item in data.get("installed", []):
+    if not isinstance(item, dict):
+        continue
+    item_market = item.get("marketplace") or item.get("marketplaceName")
+    item_id = item.get("pluginId") or item.get("id")
+    if item_market == market and not (dry_run == "1" and item_id in owned):
+        raise SystemExit(0)
+raise SystemExit(1)
+' "$a" "$SUPERPOWERS_STATE_FILE" "$DRY_RUN"; then
+                warn "skip Codex marketplace $a: another installed plugin still uses it"
+                keep=1
+              else
+                status=$?
+                if [[ $status -eq 1 ]]; then
+                  plugin_run codex plugin marketplace remove "$a"
+                  say "  -  codex marketplace $a"
+                else
+                  warn "skip owned Codex marketplace $a: cannot parse installed plugins"
+                  keep=1
+                fi
+              fi
+            else
+              status=$?
+              if [[ $status -eq 2 ]]; then
+                warn "skip owned Codex marketplace $a: cannot inspect marketplaces"
+                keep=1
+              fi
+            fi
+          fi
+          ;;
+        *)
+          [[ "$pass" == other ]] || continue
+          warn "skip unknown Superpowers state record: $kind"
+          keep=1
+          ;;
+      esac
+      if [[ $keep -eq 1 ]]; then
+        printf '%s\t%s\t%s\n' "$kind" "$a" "$b" >> "$temp"
+      fi
+    done < "$SUPERPOWERS_STATE_FILE"
+  done
+
+  if [[ $DRY_RUN -eq 1 ]]; then
+    rm -f -- "$temp"
+    say "Dry-run complete. Superpowers ownership state preserved."
+  else
+    mv "$temp" "$SUPERPOWERS_STATE_FILE"
+    say "Superpowers plugin uninstall complete."
+  fi
+}
+
 # ---- installer ----------------------------------------------------------
 do_install() {
   local cli skills_root agents_root
@@ -274,6 +648,8 @@ do_install() {
     fi
   done < <(detect_clis)
 
+  do_superpowers_install
+
   if [[ $DRY_RUN -eq 1 ]]; then
     say ""
     say "Dry-run complete. No changes were made."
@@ -287,37 +663,36 @@ do_install() {
 do_uninstall() {
   if [[ ! -s "$STATE_FILE" ]]; then
     say "Nothing to uninstall (no state file)."
-    return 0
-  fi
-
-  say "Removing previously installed paths:"
-  local cli path
-  while IFS=$'\t' read -r cli path; do
-    [[ -z "$path" ]] && continue
-    if [[ -L "$path" ]]; then
-      run rm -f -- "$path"
-      say "  -  $path"
-    elif [[ -e "$path" ]]; then
-      # Only remove if it's still under our repo (defensive).
-      local target
-      target="$(readlink -f -- "$path" 2>/dev/null || true)"
-      if is_inside_repo "$target"; then
+  else
+    say "Removing previously installed paths:"
+    local cli path
+    while IFS=$'\t' read -r cli path; do
+      [[ -z "$path" ]] && continue
+      if [[ -L "$path" ]]; then
         run rm -f -- "$path"
         say "  -  $path"
-      else
-        warn "skip $path: no longer points into $REPO_ROOT"
+      elif [[ -e "$path" ]]; then
+        # Only remove if it's still under our repo (defensive).
+        local target
+        target="$(readlink -f -- "$path" 2>/dev/null || true)"
+        if is_inside_repo "$target"; then
+          run rm -f -- "$path"
+          say "  -  $path"
+        else
+          warn "skip $path: no longer points into $REPO_ROOT"
+        fi
       fi
-    fi
-  done < "$STATE_FILE"
+    done < "$STATE_FILE"
 
-  if [[ $DRY_RUN -eq 0 ]]; then
-    : > "$STATE_FILE"
-    say ""
-    say "Uninstall complete."
-  else
-    say ""
-    say "Dry-run complete. State file preserved."
+    if [[ $DRY_RUN -eq 0 ]]; then
+      : > "$STATE_FILE"
+      say "Uninstall complete."
+    else
+      say "Dry-run complete. State file preserved."
+    fi
   fi
+
+  do_superpowers_uninstall
 }
 
 # ---- main ---------------------------------------------------------------
