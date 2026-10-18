@@ -61,6 +61,11 @@ repo keeps **per-CLI variants** of every skill and agent while sharing one
 ├── .gitignore
 ├── bin/
 │   └── setup                 # idempotent installer (bash)
+├── integrations/
+│   └── superpowers.env       # pinned upstream Superpowers source (public metadata only)
+├── tests/
+│   └── setup-superpowers.sh  # fake-CLI tests for plugin setup
+├── docs/superpowers/         # global plugin design spec and implementation plan
 ├── skills/
 │   └── <skill-name>/
 │       ├── SKILL.md          # canonical / source-of-truth description
@@ -190,6 +195,36 @@ Run:
 
 By default the script uses **copies** so you can edit installed skills
 without touching this repo. Pass `--link` to use symlinks instead.
+
+### Global Superpowers plugin
+
+`./bin/setup` is also the single command that manages the global Superpowers
+plugin for Codex and OpenCode. It installs the full upstream plugin, including
+its workflow bootstrap, so it applies across work projects. Do not add
+project-scoped `opencode.json` or `.codex/config.toml` plugin declarations;
+they would shadow or duplicate the global install.
+
+- The pin lives in `integrations/superpowers.env`: upstream
+  `https://github.com/obra/superpowers.git` at `v7.0.0`, Codex marketplace
+  `superpowers-dev`, plugin `superpowers`. Both harnesses share this pin.
+- Codex: registers the marketplace at the pinned ref
+  (`codex plugin marketplace add --ref`), then installs
+  `superpowers@superpowers-dev`.
+- OpenCode: adds `git+https://github.com/obra/superpowers.git#v7.0.0` with
+  `opencode plugin add`.
+- Plugins are handled only for CLIs on `PATH`, and `--cli=` filters them.
+- Setup uses the native plugin commands and never claims entries that already
+  existed. A marketplace name bound to a different source is left untouched.
+  Entries this setup creates are recorded in the git-ignored
+  `.setup-state/superpowers.tsv`; `--uninstall` removes only those.
+- `--dry-run` prints the intended plugin commands and runs no mutating CLI
+  command or ownership writes. `--uninstall --dry-run` previews removals.
+
+To change the shared pin: run `./bin/setup --uninstall`, edit
+`SUPERPOWERS_REF` in `integrations/superpowers.env`, then run `./bin/setup`.
+Uninstalling first matters because re-running setup does not replace an
+existing entry (OpenCode matches by package name), and Codex may report a
+conflict for a marketplace registered at the old ref.
 
 ---
 
