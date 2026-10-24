@@ -32,8 +32,11 @@ flavors wedged together, this repo keeps:
 ├── LICENSE             # MIT
 ├── .gitignore
 ├── bin/
-│   ├── setup           # idempotent installer
+│   ├── setup           # idempotent installer (also manages Superpowers plugins)
 │   └── check-secrets   # pre-commit secret scanner
+├── integrations/
+│   └── superpowers.env # pinned upstream Superpowers source (public metadata only)
+├── docs/superpowers/   # global plugin design spec and implementation plan
 ├── skills/
 │   └── <skill-name>/
 │       ├── SKILL.md          # canonical
@@ -55,7 +58,8 @@ flavors wedged together, this repo keeps:
 git clone https://github.com/dzmitryk-dev/my-ai-workflow.git
 cd my-ai-workflow
 
-# Install all skills/agents into every CLI you have installed
+# Install all skills/agents into every CLI you have installed,
+# plus the pinned global Superpowers plugin for Codex and OpenCode
 ./bin/setup
 
 # Or target a specific CLI
@@ -67,6 +71,53 @@ cd my-ai-workflow
 # Use symlinks instead of copies (edits in this repo are picked up live)
 ./bin/setup --link
 ```
+
+## Global Superpowers plugin
+
+`./bin/setup` is the single command for managing the global Superpowers plugin
+for Codex and OpenCode. It installs the full upstream plugin, including its
+workflow bootstrap, so it applies across your work projects. The plugin is
+pinned to upstream release `v7.0.0`. Do not add project-scoped `opencode.json`
+or `.codex/config.toml` plugin declarations; they would shadow or duplicate the
+global install.
+
+The pin lives in [`integrations/superpowers.env`](./integrations/superpowers.env):
+the public repository `https://github.com/obra/superpowers.git`, ref `v7.0.0`,
+Codex marketplace `superpowers-dev`, and plugin `superpowers`.
+
+- **Codex:** registers the marketplace at the pinned ref with
+  `codex plugin marketplace add --ref`, then installs `superpowers@superpowers-dev`.
+- **OpenCode:** adds `git+https://github.com/obra/superpowers.git#v7.0.0` with
+  `opencode plugin add`.
+- Plugins are handled only for CLIs found on your `PATH`. `--cli=` limits the
+  target as it does for skills and agents.
+- Setup uses each CLI's native plugin commands, so unrelated plugins and
+  settings are preserved. Entries that already existed are not claimed, and a
+  marketplace name already bound to a different source is left untouched.
+  Entries this setup creates are recorded in the git-ignored
+  `.setup-state/superpowers.tsv`.
+
+```bash
+./bin/setup --dry-run             # print intended plugin and skill actions
+./bin/setup --uninstall           # remove owned plugin entries and tracked paths
+./bin/setup --uninstall --dry-run # preview the uninstall
+```
+
+`--dry-run` runs no mutating CLI command and records no ownership state.
+`--uninstall` removes only the entries recorded in the state file.
+
+### Updating the shared pin
+
+```bash
+./bin/setup --uninstall           # remove the entries this repo created at the old pin
+$EDITOR integrations/superpowers.env   # change SUPERPOWERS_REF
+./bin/setup                       # install the new pin
+```
+
+Uninstall first because re-running setup does not replace an existing entry
+(OpenCode matches by package name), and Codex may report a conflict for a
+marketplace registered at the old ref. If a conflict is reported for a
+marketplace that existed before this repo managed it, resolve it manually.
 
 ## Adding a skill
 
@@ -105,8 +156,8 @@ $EDITOR agents/<name>/opencode/<name>.md
 
 | Script                    | Purpose                                                       |
 | ------------------------- | ------------------------------------------------------------- |
-| `./bin/setup`             | Install per-CLI variants into each CLI's expected directories |
-| `./bin/setup --uninstall` | Remove previously installed paths (tracked in state file)     |
+| `./bin/setup`             | Install per-CLI variants and the pinned Superpowers plugin    |
+| `./bin/setup --uninstall` | Remove tracked paths and plugin entries this repo created     |
 | `./bin/check-secrets`     | Scan staged changes for accidentally-committed secrets        |
 
 To enable the secret scanner as a pre-commit hook:
