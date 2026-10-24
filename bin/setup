@@ -438,7 +438,9 @@ do_superpowers_install() {
         IFS=$'\t' read -r marketplace_name already_added <<< "$marketplace_result"
         if [[ "$marketplace_name" != "$SUPERPOWERS_CODEX_MARKETPLACE" ]]; then
           if [[ "$already_added" == false ]]; then
-            plugin_run codex plugin marketplace remove "$marketplace_name"
+            if ! plugin_run codex plugin marketplace remove "$marketplace_name"; then
+              warn "codex: failed to remove unexpected marketplace '$marketplace_name'; it may need manual cleanup"
+            fi
           fi
           warn "codex: pinned source resolved to marketplace '$marketplace_name', expected '$SUPERPOWERS_CODEX_MARKETPLACE'; skipping plugin install"
           market_status="failed"
@@ -463,8 +465,11 @@ do_superpowers_install() {
         if [[ $plugin_status -eq 2 ]]; then
           warn "codex: cannot inspect installed plugins; skipping Superpowers plugin install"
         else
-          plugin_run codex plugin add "${SUPERPOWERS_CODEX_PLUGIN}@${SUPERPOWERS_CODEX_MARKETPLACE}"
-          plugin_state_add $'codex-plugin\t'"$SUPERPOWERS_CODEX_PLUGIN"$'\t'"$SUPERPOWERS_CODEX_MARKETPLACE"
+          if plugin_run codex plugin add "${SUPERPOWERS_CODEX_PLUGIN}@${SUPERPOWERS_CODEX_MARKETPLACE}"; then
+            plugin_state_add $'codex-plugin\t'"$SUPERPOWERS_CODEX_PLUGIN"$'\t'"$SUPERPOWERS_CODEX_MARKETPLACE"
+          else
+            warn "codex: failed to install Superpowers plugin; ownership was not recorded"
+          fi
         fi
       fi
     fi
@@ -480,8 +485,11 @@ do_superpowers_install() {
       if [[ $open_status -eq 2 ]]; then
         warn "opencode: cannot inspect installed plugins; skipping Superpowers install"
       else
-        plugin_run opencode plugin add "$SUPERPOWERS_OPENCODE_SPEC"
-        plugin_state_add $'opencode-plugin\t'"$SUPERPOWERS_OPENCODE_SPEC"$'\t'"$SUPERPOWERS_CODEX_PLUGIN"
+        if plugin_run opencode plugin add "$SUPERPOWERS_OPENCODE_SPEC"; then
+          plugin_state_add $'opencode-plugin\t'"$SUPERPOWERS_OPENCODE_SPEC"$'\t'"$SUPERPOWERS_CODEX_PLUGIN"
+        else
+          warn "opencode: failed to install Superpowers plugin; ownership was not recorded"
+        fi
       fi
     fi
   fi
@@ -504,8 +512,12 @@ do_superpowers_uninstall() {
           if ! cli_selected codex; then keep=1
           elif command -v codex >/dev/null 2>&1; then
             if codex_plugin_id_present "$a" "$b"; then
-              plugin_run codex plugin remove "$a@$b"
-              say "  -  codex plugin $a@$b"
+              if plugin_run codex plugin remove "$a@$b"; then
+                say "  -  codex plugin $a@$b"
+              else
+                warn "codex: failed to remove plugin $a@$b; ownership retained for retry"
+                keep=1
+              fi
             else
               status=$?
               if [[ $status -eq 2 ]]; then
@@ -523,8 +535,12 @@ do_superpowers_uninstall() {
           if ! cli_selected opencode; then keep=1
           elif command -v opencode >/dev/null 2>&1; then
             if opencode_plugin_spec_present "$a" "$b"; then
-              plugin_run opencode plugin remove "$a"
-              say "  -  opencode plugin $a"
+              if plugin_run opencode plugin remove "$a"; then
+                say "  -  opencode plugin $a"
+              else
+                warn "opencode: failed to remove plugin $a; ownership retained for retry"
+                keep=1
+              fi
             else
               status=$?
               if [[ $status -eq 2 ]]; then
@@ -577,8 +593,12 @@ raise SystemExit(1)
               else
                 status=$?
                 if [[ $status -eq 1 ]]; then
-                  plugin_run codex plugin marketplace remove "$a"
-                  say "  -  codex marketplace $a"
+                  if plugin_run codex plugin marketplace remove "$a"; then
+                    say "  -  codex marketplace $a"
+                  else
+                    warn "codex: failed to remove marketplace $a; ownership retained for retry"
+                    keep=1
+                  fi
                 else
                   warn "skip owned Codex marketplace $a: cannot parse installed plugins"
                   keep=1

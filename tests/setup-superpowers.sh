@@ -71,6 +71,10 @@ print(json.dumps({"installed": items, "available": []}))
 PY
     ;;
   'plugin marketplace add '*)
+    if [[ ${FAKE_CODEX_FAIL:-} == marketplace-add ]]; then
+      printf 'injected marketplace add failure\n' >&2
+      exit 1
+    fi
     source="$4"; ref="$6"; name="superpowers-dev"
     if grep -Fq "$name" "$FAKE_CODEX_MARKETPLACES"; then
       if grep -Fqx "$name$(printf '\t')$source$(printf '\t')$ref" "$FAKE_CODEX_MARKETPLACES"; then
@@ -85,15 +89,27 @@ PY
     fi
     ;;
   'plugin marketplace remove '*)
+    if [[ ${FAKE_CODEX_FAIL:-} == marketplace-remove ]]; then
+      printf 'injected marketplace remove failure\n' >&2
+      exit 1
+    fi
     name="$4"
     awk -F '\t' -v name="$name" '$1 != name' "$FAKE_CODEX_MARKETPLACES" > "$FAKE_CODEX_MARKETPLACES.tmp"
     mv "$FAKE_CODEX_MARKETPLACES.tmp" "$FAKE_CODEX_MARKETPLACES"
     ;;
   'plugin add '*)
+    if [[ ${FAKE_CODEX_FAIL:-} == plugin-add ]]; then
+      printf 'injected plugin add failure\n' >&2
+      exit 1
+    fi
     id="$3"; plugin="${id%@*}"; marketplace="${id#*@}"
     printf '%s\t%s\n' "$plugin" "$marketplace" >> "$FAKE_CODEX_PLUGINS"
     ;;
   'plugin remove '*)
+    if [[ ${FAKE_CODEX_FAIL:-} == plugin-remove ]]; then
+      printf 'injected plugin remove failure\n' >&2
+      exit 1
+    fi
     id="$3"; plugin="${id%@*}"; marketplace="${id#*@}"
     awk -F '\t' -v plugin="$plugin" -v marketplace="$marketplace" \
       '$1 != plugin || $2 != marketplace' "$FAKE_CODEX_PLUGINS" > "$FAKE_CODEX_PLUGINS.tmp"
@@ -109,8 +125,18 @@ set -euo pipefail
 printf 'opencode %s\n' "$*" >> "$FAKE_CALL_LOG"
 case "$*" in
   'plugin list') cat "$FAKE_OPENCODE_PLUGINS" ;;
-  'plugin add '*) printf '%s\n' "$3" >> "$FAKE_OPENCODE_PLUGINS" ;;
+  'plugin add '*)
+    if [[ ${FAKE_OPENCODE_FAIL:-} == plugin-add ]]; then
+      printf 'injected plugin add failure\n' >&2
+      exit 1
+    fi
+    printf '%s\n' "$3" >> "$FAKE_OPENCODE_PLUGINS"
+    ;;
   'plugin remove '*)
+    if [[ ${FAKE_OPENCODE_FAIL:-} == plugin-remove ]]; then
+      printf 'injected plugin remove failure\n' >&2
+      exit 1
+    fi
     spec="$3"
     grep -Fvx -- "$spec" "$FAKE_OPENCODE_PLUGINS" > "$FAKE_OPENCODE_PLUGINS.tmp" || true
     mv "$FAKE_OPENCODE_PLUGINS.tmp" "$FAKE_OPENCODE_PLUGINS"
@@ -261,6 +287,98 @@ test_filtered_and_dry_run_uninstall() {
   [[ ! -s "$WORLD/repo/.setup-state/superpowers.tsv" ]] || fail 'uninstall retained state for manually removed plugins'
 }
 
+test_missing_cli_install_and_uninstall_retains_ownership() {
+  new_world missing-codex
+  rm "$WORLD/bin/codex"
+  run_setup > "$WORLD/output"
+  assert_contains "$WORLD/calls.log" 'opencode plugin add'
+  assert_not_contains "$WORLD/calls.log" 'codex plugin'
+  assert_contains "$WORLD/repo/.setup-state/superpowers.tsv" 'opencode-plugin'
+  assert_not_contains "$WORLD/repo/.setup-state/superpowers.tsv" 'codex-'
+
+  new_world missing-opencode
+  rm "$WORLD/bin/opencode"
+  run_setup > "$WORLD/output"
+  assert_contains "$WORLD/calls.log" 'codex plugin add'
+  assert_not_contains "$WORLD/calls.log" 'opencode plugin'
+  assert_contains "$WORLD/repo/.setup-state/superpowers.tsv" 'codex-plugin'
+  assert_not_contains "$WORLD/repo/.setup-state/superpowers.tsv" 'opencode-'
+
+  new_world uninstall-missing-codex
+  run_setup > "$WORLD/output"
+  rm "$WORLD/bin/codex"
+  run_setup --uninstall > "$WORLD/output" 2> "$WORLD/error"
+  assert_contains "$WORLD/error" 'codex CLI is unavailable'
+  assert_contains "$WORLD/calls.log" 'opencode plugin remove'
+  assert_not_contains "$WORLD/repo/.setup-state/superpowers.tsv" 'opencode-plugin'
+  assert_contains "$WORLD/repo/.setup-state/superpowers.tsv" 'codex-plugin'
+  assert_contains "$WORLD/repo/.setup-state/superpowers.tsv" 'codex-marketplace'
+
+  new_world uninstall-missing-opencode
+  run_setup > "$WORLD/output"
+  rm "$WORLD/bin/opencode"
+  run_setup --uninstall > "$WORLD/output" 2> "$WORLD/error"
+  assert_contains "$WORLD/error" 'opencode CLI is unavailable'
+  assert_contains "$WORLD/calls.log" 'codex plugin remove'
+  assert_not_contains "$WORLD/repo/.setup-state/superpowers.tsv" 'codex-'
+  assert_contains "$WORLD/repo/.setup-state/superpowers.tsv" 'opencode-plugin'
+}
+
+test_plugin_operation_failures_continue_and_preserve_state() {
+  new_world codex-marketplace-add-failure
+  FAKE_CODEX_FAIL=marketplace-add run_setup > "$WORLD/output" 2> "$WORLD/error"
+  assert_contains "$WORLD/error" 'codex: failed to register'
+  assert_contains "$WORLD/calls.log" 'opencode plugin add'
+  assert_not_contains "$WORLD/repo/.setup-state/superpowers.tsv" 'codex-'
+  assert_contains "$WORLD/repo/.setup-state/superpowers.tsv" 'opencode-plugin'
+
+  new_world codex-plugin-add-failure
+  FAKE_CODEX_FAIL=plugin-add run_setup > "$WORLD/output" 2> "$WORLD/error"
+  assert_contains "$WORLD/error" 'codex: failed to install'
+  assert_contains "$WORLD/calls.log" 'opencode plugin add'
+  assert_not_contains "$WORLD/repo/.setup-state/superpowers.tsv" 'codex-plugin'
+  assert_contains "$WORLD/repo/.setup-state/superpowers.tsv" 'codex-marketplace'
+
+  new_world opencode-plugin-add-failure
+  FAKE_OPENCODE_FAIL=plugin-add run_setup > "$WORLD/output" 2> "$WORLD/error"
+  assert_contains "$WORLD/error" 'opencode: failed to install'
+  assert_contains "$WORLD/calls.log" 'codex plugin add'
+  assert_contains "$WORLD/repo/.setup-state/superpowers.tsv" 'codex-plugin'
+  assert_not_contains "$WORLD/repo/.setup-state/superpowers.tsv" 'opencode-plugin'
+
+  new_world codex-plugin-remove-failure
+  run_setup > "$WORLD/output"
+  FAKE_CODEX_FAIL=plugin-remove run_setup --uninstall > "$WORLD/output" 2> "$WORLD/error"
+  assert_contains "$WORLD/error" 'codex: failed to remove plugin'
+  assert_contains "$WORLD/calls.log" 'opencode plugin remove'
+  assert_contains "$WORLD/repo/.setup-state/superpowers.tsv" 'codex-plugin'
+  assert_contains "$WORLD/repo/.setup-state/superpowers.tsv" 'codex-marketplace'
+  assert_not_contains "$WORLD/repo/.setup-state/superpowers.tsv" 'opencode-plugin'
+  run_setup --uninstall > "$WORLD/output"
+  [[ ! -s "$WORLD/repo/.setup-state/superpowers.tsv" ]] || fail 'Codex ownership was not cleared after retry'
+
+  new_world codex-marketplace-remove-failure
+  run_setup > "$WORLD/output"
+  FAKE_CODEX_FAIL=marketplace-remove run_setup --uninstall > "$WORLD/output" 2> "$WORLD/error"
+  assert_contains "$WORLD/error" 'codex: failed to remove marketplace'
+  assert_contains "$WORLD/calls.log" 'opencode plugin remove'
+  assert_contains "$WORLD/repo/.setup-state/superpowers.tsv" 'codex-marketplace'
+  assert_not_contains "$WORLD/repo/.setup-state/superpowers.tsv" 'codex-plugin'
+  assert_not_contains "$WORLD/repo/.setup-state/superpowers.tsv" 'opencode-plugin'
+  run_setup --uninstall > "$WORLD/output"
+  [[ ! -s "$WORLD/repo/.setup-state/superpowers.tsv" ]] || fail 'Codex marketplace ownership was not cleared after retry'
+
+  new_world opencode-plugin-remove-failure
+  run_setup > "$WORLD/output"
+  FAKE_OPENCODE_FAIL=plugin-remove run_setup --uninstall > "$WORLD/output" 2> "$WORLD/error"
+  assert_contains "$WORLD/error" 'opencode: failed to remove plugin'
+  assert_contains "$WORLD/calls.log" 'codex plugin remove'
+  assert_contains "$WORLD/repo/.setup-state/superpowers.tsv" 'opencode-plugin'
+  assert_not_contains "$WORLD/repo/.setup-state/superpowers.tsv" 'codex-'
+  run_setup --uninstall > "$WORLD/output"
+  [[ ! -s "$WORLD/repo/.setup-state/superpowers.tsv" ]] || fail 'OpenCode ownership was not cleared after retry'
+}
+
 test_install_repeat_and_separate_state
 test_cli_filter
 test_existing_entries_are_not_claimed
@@ -268,4 +386,6 @@ test_conflicting_codex_marketplace_is_preserved
 test_dry_run_changes_nothing
 test_uninstall_removes_only_owned_entries
 test_filtered_and_dry_run_uninstall
+test_missing_cli_install_and_uninstall_retains_ownership
+test_plugin_operation_failures_continue_and_preserve_state
 printf 'PASS: setup-superpowers fake-CLI tests\n'
