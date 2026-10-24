@@ -6,7 +6,7 @@
 
 **Architecture:** Keep the upstream URL, release ref, and Codex marketplace identity in a small tracked manifest. Extend `bin/setup` to call each harness's native plugin manager, tracking only changes it creates in ignored local setup state. Remove the temporary project-local plugin declarations and document the global setup behavior.
 
-**Tech Stack:** Bash, OpenCode CLI plugin manager, Codex CLI plugin/marketplace manager, shell-based integration tests with fake CLIs.
+**Tech Stack:** Bash, OpenCode CLI plugin manager, Codex CLI plugin/marketplace manager.
 
 **Spec:** `docs/superpowers/specs/2026-10-18-superpowers-global-config.md`
 
@@ -17,14 +17,15 @@
 - Honor `--cli`, `--dry-run`, and `--uninstall` in `bin/setup`.
 - Never uninstall plugin or marketplace entries that existed before this repo managed them.
 - Do not vendor RTK, credentials, or machine-specific global config.
+- Keep this personal setup simple: use shell syntax and dry-run smoke checks, not a large fake-CLI test harness.
 
 ## Review Focus
 
-- An already-installed plugin must not be duplicated or claimed as repo-owned; test install when the fake CLI reports a pre-existing plugin.
-- A marketplace name already used for another source must not be overwritten; test conflicting marketplace metadata.
-- `--dry-run` must not invoke mutating CLI commands or write state; test with command-log fakes.
-- `--uninstall` must remove only state-marked entries and preserve unrelated plugins; test mixed owned/pre-existing state.
-- Missing Codex or OpenCode executables must not break installation of the other detected harness; test each missing-CLI case.
+- An already-installed plugin must not be duplicated or claimed as repo-owned; inspect the detection/ownership paths.
+- A marketplace name already used for another source must not be overwritten; inspect conflict handling.
+- `--dry-run` must not invoke mutating CLI commands or write state; verify with a dry-run smoke check.
+- `--uninstall` must remove only state-marked entries and preserve unrelated plugins; inspect ownership guards.
+- Missing Codex or OpenCode executables must not break installation of the other detected harness; inspect availability guards.
 
 ---
 
@@ -33,7 +34,6 @@
 **Files:**
 - Create: `integrations/superpowers.env`
 - Modify: `bin/setup`
-- Test: `tests/setup-superpowers.sh`
 
 **Interfaces:**
 - Manifest variables: `SUPERPOWERS_REPOSITORY`, `SUPERPOWERS_REF`, `SUPERPOWERS_CODEX_MARKETPLACE`, `SUPERPOWERS_CODEX_PLUGIN`.
@@ -41,11 +41,9 @@
 - OpenCode install: add the pinned Git package spec using `opencode plugin add`.
 - State: a dedicated ignored setup-state file records marketplace/plugin entries created by this setup; do not overload the existing installed-path TSV.
 
-- [ ] **Step 1: Write fake-CLI tests** for install commands, repeat setup, `--cli` filtering, pre-existing entries, conflicting Codex marketplace identity, dry-run, and ownership-aware uninstall.
-- [ ] **Step 2: Run the tests** with `bash tests/setup-superpowers.sh` and confirm they fail because `bin/setup` does not manage plugin installs yet.
-- [ ] **Step 3: Add the pinned manifest** with repository `https://github.com/obra/superpowers.git`, ref `v7.0.0`, marketplace `superpowers-dev`, and plugin `superpowers`.
-- [ ] **Step 4: Extend `bin/setup`** to detect installed Codex/OpenCode CLIs, invoke their native plugin managers, preserve pre-existing entries, track owned entries, and honor install/dry-run/uninstall/CLI filtering.
-- [ ] **Step 5: Re-run the fake-CLI tests** and confirm they pass, including preservation of unrelated plugin entries.
+- [ ] **Step 1: Add the pinned manifest** with repository `https://github.com/obra/superpowers.git`, ref `v7.0.0`, marketplace `superpowers-dev`, and plugin `superpowers`.
+- [ ] **Step 2: Extend `bin/setup`** to detect installed Codex/OpenCode CLIs, invoke their native plugin managers, preserve pre-existing entries, track owned entries, and honor install/dry-run/uninstall/CLI filtering.
+- [ ] **Step 3: Run lightweight checks**: `bash -n bin/setup` and `./bin/setup --dry-run`; confirm no mutating CLI command or ownership write occurs.
 
 ### Task 2: Replace project-local trial configs with global setup documentation
 
@@ -68,9 +66,8 @@
 ### Task 3: Verify the complete setup path
 
 **Files:**
-- Verify: `bin/setup`, `tests/setup-superpowers.sh`, `README.md`, `AGENTS.md`
+- Verify: `bin/setup`, `README.md`, `AGENTS.md`
 
-- [ ] **Step 1: Run** `bash -n bin/setup tests/setup-superpowers.sh` and require success.
-- [ ] **Step 2: Run** `bash tests/setup-superpowers.sh` and require all cases to pass.
-- [ ] **Step 3: Run** `./bin/setup --dry-run` and confirm it reports intended Codex/OpenCode actions without changing the working tree or invoking mutating commands.
-- [ ] **Step 4: Run** `git diff --check` and inspect `git status --short` to confirm a cleanly scoped, secret-free change set.
+- [ ] **Step 1: Run** `bash -n bin/setup` and require success.
+- [ ] **Step 2: Run** `./bin/setup --dry-run` and confirm it reports intended Codex/OpenCode actions without changing state or invoking mutating commands.
+- [ ] **Step 3: Run** `git diff --check` and inspect `git status --short` to confirm a cleanly scoped, secret-free change set.

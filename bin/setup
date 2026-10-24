@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# bin/setup — install/remove skills & agents for Claude Code, Codex, opencode.
+# bin/setup — install/remove skills and agents, plus the pinned Superpowers
+# plugin for Codex and opencode.
 #
 # Usage:
 #   ./bin/setup                       # install for every detected CLI
@@ -10,13 +11,11 @@
 #   ./bin/setup --uninstall --dry-run # preview uninstall
 #
 # Behavior:
-#   - Scans ./skills/<name>/<cli>/ for SKILL.md and copies/symlinks them into
-#     each CLI's expected directory.
-#   - Scans ./agents/<name>/<cli>/ for the CLI's agent file and installs it.
-#   - Idempotent: if a destination already points to a path inside this repo,
-#     it is left alone; otherwise it is replaced (with a warning in non-dry-run).
-#   - Tracks installed paths in ./.setup-state/installed.tsv so --uninstall
-#     removes exactly what was created.
+#   - Copies/symlinks each selected CLI's skill and agent variants to its
+#     expected global directories.
+#   - Uses native Codex/OpenCode plugin commands for the pinned Superpowers
+#     plugin; tracks owned plugin entries separately in .setup-state.
+#   - Re-running is safe; --uninstall removes only entries recorded by setup.
 
 set -euo pipefail
 

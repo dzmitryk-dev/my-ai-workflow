@@ -36,8 +36,6 @@ flavors wedged together, this repo keeps:
 │   └── check-secrets   # pre-commit secret scanner
 ├── integrations/
 │   └── superpowers.env # pinned upstream Superpowers source (public metadata only)
-├── tests/
-│   └── setup-superpowers.sh  # fake-CLI tests for plugin setup
 ├── docs/superpowers/   # global plugin design spec and implementation plan
 ├── skills/
 │   └── <skill-name>/
@@ -160,7 +158,6 @@ $EDITOR agents/<name>/opencode/<name>.md
 | ------------------------- | ------------------------------------------------------------- |
 | `./bin/setup`             | Install per-CLI variants and the pinned Superpowers plugin    |
 | `./bin/setup --uninstall` | Remove tracked paths and plugin entries this repo created     |
-| `bash tests/setup-superpowers.sh` | Run fake-CLI tests for the Superpowers plugin setup   |
 | `./bin/check-secrets`     | Scan staged changes for accidentally-committed secrets        |
 
 To enable the secret scanner as a pre-commit hook:

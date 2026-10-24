@@ -50,6 +50,15 @@ Each CLI uses its own frontmatter shape and triggers differently, so this
 repo keeps **per-CLI variants** of every skill and agent while sharing one
 **canonical** human-readable source for each.
 
+### Keep changes simple
+
+This is a personal workflow repo. Prefer the simplest solution that meets the
+current need; apply **KISS** and **YAGNI**. Avoid speculative abstractions,
+generic frameworks, and production-scale scaffolding. For small personal setup
+scripts, prefer syntax checks and dry-run smoke checks over a large maintained
+test harness; add automated tests when the actual complexity or risk justifies
+their ongoing cost.
+
 ---
 
 ## Repository layout
@@ -63,8 +72,6 @@ repo keeps **per-CLI variants** of every skill and agent while sharing one
 │   └── setup                 # idempotent installer (bash)
 ├── integrations/
 │   └── superpowers.env       # pinned upstream Superpowers source (public metadata only)
-├── tests/
-│   └── setup-superpowers.sh  # fake-CLI tests for plugin setup
 ├── docs/superpowers/         # global plugin design spec and implementation plan
 ├── skills/
 │   └── <skill-name>/

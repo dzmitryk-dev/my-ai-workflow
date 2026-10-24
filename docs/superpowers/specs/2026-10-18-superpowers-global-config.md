@@ -23,5 +23,7 @@ so one setup command configures it globally for the user's work projects.
 - Uninstall must not remove pre-existing user-managed plugin entries.
 - The full plugin includes its workflow bootstrap; this trial intentionally
   enables the complete Superpowers set.
+- Keep the setup maintainable as personal tooling: use lightweight syntax and
+  dry-run checks rather than a large fake-CLI test harness.
 - The repository is public. Do not copy credentials or machine-specific global
   configuration into it.
