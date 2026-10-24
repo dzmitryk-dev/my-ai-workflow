@@ -243,8 +243,8 @@ installed into `~/.config/opencode/`:
 - `config.jsonc` — the managed `permissions`/`policies` keys
 - `plugins/git-approval.ts` — re-forces `ask` for every `git commit`/`git push`,
   so "Allow always" cannot create a standing bypass
-- `plugins/fs-guard.ts` — denies shell commands that reach into `~/.gradle` or
-  `~/.config/opencode`
+- `plugins/fs-guard.ts` — denies *reads* of `~/.gradle` (writes pass: a redirect
+  target reveals nothing) and any access to `~/.config/opencode`
 
 `./bin/setup` merges the config keys into the global `opencode.jsonc` (backing it
 up first) and copies the plugins. Edit the repo, then re-run

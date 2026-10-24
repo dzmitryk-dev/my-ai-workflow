@@ -21,15 +21,29 @@ const ctx = {
 await (plugin as any).setup(ctx)
 
 const cases: Array<[string, string]> = [
+  // Reads of the Gradle cache are denied, however the path is spelled.
   ["unzip ~/.gradle/caches/modules-2/files-2.1/foo/bar.jar", "deny"],
   [`ls ${home}/.gradle`, "deny"],
   ["cat $HOME/.gradle/x", "deny"],
   ["cat ${HOME}/.gradle/x", "deny"],
   ["cat ../../.gradle/caches/x", "deny"],
+  ["cat ~/.gradle/x > notes.txt", "deny"],
+
+  // Writing to it is not reading it: no cache contents reach the agent.
+  ["echo generated >> ~/.gradle/probe", "allow"],
+  ['echo generated >> "~/.gradle/probe"', "allow"],
+  ["echo generated > ~/.gradle/probe", "allow"],
+
+  // The harness config is denied in both directions.
   ["cat ~/.config/opencode/opencode.jsonc", "deny"],
   ["cat ${HOME}/.config/opencode/plugins/fs-guard.ts", "deny"],
+  ["echo x > ~/.config/opencode/opencode.jsonc", "deny"],
+  ["cp something ~/.config/opencode/plugins/fs-guard.ts", "deny"],
+
+  // Data, not paths.
   ['git commit -m "stop reading ~/.gradle"', "allow"],
-  ["git commit -m 'x' -m \"~/.gradle\"", "allow"],
+  ['git commit -m \'x\' -m "~/.gradle"', "allow"],
+
   ["git status", "allow"],
   ["git commit -m x", "allow"],
   ["awk '{print $1}' file", "allow"],

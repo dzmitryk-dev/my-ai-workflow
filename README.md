@@ -163,8 +163,9 @@ backing it up first and leaving every other key (`mcp`, `plugins`, ...) alone.
 | Guardrail | Behaviour |
 | --------- | --------- |
 | `git commit` / `git push` | Prompts **every** time, even after "Allow always" |
-| `~/.gradle/**` | Denied outright — no prompt, no approval escape |
-| `~/.config/opencode/**` | Denied — the harness cannot rewrite its own guardrails |
+| reading `~/.gradle/**` | Denied outright — no prompt, no approval escape |
+| writing `~/.gradle/**` | Allowed — a redirect target reveals nothing |
+| `~/.config/opencode/**` | Denied both ways — the harness cannot rewrite its own guardrails |
 
 ```bash
 ./bin/setup --cli=opencode --dry-run   # preview
@@ -185,6 +186,12 @@ Two pieces are needed because neither alone is sufficient:
 `external_directory` permission only inspects a command's *working directory*,
 so `cd ~/.gradle` is rejected while `unzip ~/.gradle/caches/.../x.jar` is not.
 The hook reads the command text instead.
+
+A path merely appearing in a command is not enough to deny it. What counts is
+whether the command reads it: `cat ~/.gradle/x` is denied, `echo x >> ~/.gradle/y`
+is not, and `git commit -m "drop ~/.gradle"` passes because the path is message
+text. `~/.config/opencode` is the exception — denied in both directions, because
+reading it leaks and writing it tampers.
 
 Both plugins are text heuristics, not sandboxes: a binary that opens a denied
 path from inside its own logic is invisible to them.
