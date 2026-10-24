@@ -1,0 +1,25 @@
+// Managed by bin/setup — `permissions` and `policies` are owned by this file.
+// Edit them here, then run ./bin/setup --cli=opencode. Anything else in
+// ~/.config/opencode/opencode.jsonc (mcp, plugins, model, ...) is preserved as-is.
+//
+// `~` is expanded by OpenCode when these rules load.
+{
+  "permissions": [
+    // Caches are denied outright: no prompt, no "Allow always" escape hatch.
+    // An agent that cannot find something should read the repo or ask Context7,
+    // not decompile a Gradle artifact.
+    { "action": "read", "resource": "~/.gradle/*", "effect": "deny" },
+    { "action": "edit", "resource": "~/.gradle/*", "effect": "deny" },
+
+    // This harness must not rewrite its own guardrails. They are installed
+    // from the my-ai-workflow repo by the human running bin/setup.
+    { "action": "read", "resource": "~/.config/opencode/*", "effect": "deny" },
+    { "action": "edit", "resource": "~/.config/opencode/*", "effect": "deny" },
+
+    // Commits and pushes always ask. The static rule documents intent;
+    // plugins/git-approval.ts is what defeats "Allow always".
+    { "action": "shell", "resource": "git commit *", "effect": "ask" },
+    { "action": "shell", "resource": "git push *", "effect": "ask" }
+  ],
+  "policies": []
+}

@@ -235,6 +235,25 @@ conflict for a marketplace registered at the old ref.
 
 ---
 
+### opencode guardrails
+
+`integrations/opencode/` is the source of truth for the harness guardrails
+installed into `~/.config/opencode/`:
+
+- `config.jsonc` — the managed `permissions`/`policies` keys
+- `plugins/git-approval.ts` — re-forces `ask` for every `git commit`/`git push`,
+  so "Allow always" cannot create a standing bypass
+- `plugins/fs-guard.ts` — denies shell commands that reach into `~/.gradle` or
+  `~/.config/opencode`
+
+`./bin/setup` merges the config keys into the global `opencode.jsonc` (backing it
+up first) and copies the plugins. Edit the repo, then re-run
+`./bin/setup --cli=opencode`. Do not edit the installed copies: the harness is
+not permitted to write to `~/.config/opencode`, which is what stops an agent
+from rewriting its own guardrails.
+
+---
+
 ## Adding a new skill
 
 1. `mkdir -p skills/<name>`

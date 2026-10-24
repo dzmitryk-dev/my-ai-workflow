@@ -15,6 +15,9 @@
 #     expected global directories.
 #   - Uses native Codex/OpenCode plugin commands for the pinned Superpowers
 #     plugin; tracks owned plugin entries separately in .setup-state.
+#   - For opencode, installs the guardrail plugins from integrations/opencode/
+#     and merges the managed `permissions`/`policies` keys into the global
+#     opencode.jsonc. The file is backed up before every merge.
 #   - Re-running is safe; --uninstall removes only entries recorded by setup.
 
 set -euo pipefail
@@ -55,6 +58,7 @@ STATE_DIR="$REPO_ROOT/.setup-state"
 STATE_FILE="$STATE_DIR/installed.tsv"
 SUPERPOWERS_STATE_FILE="$STATE_DIR/superpowers.tsv"
 SUPERPOWERS_MANIFEST="$REPO_ROOT/integrations/superpowers.env"
+OPENCODE_GUARDRAILS_DIR="$REPO_ROOT/integrations/opencode"
 
 if [[ $DRY_RUN -eq 0 ]]; then
   mkdir -p "$STATE_DIR"
@@ -71,7 +75,7 @@ run() {
   if [[ $DRY_RUN -eq 1 ]]; then
     printf '  (dry-run) %s\n' "$*"
   else
-    eval "$@"
+    "$@"
   fi
 }
 
@@ -194,7 +198,12 @@ install_file() {
   fi
 
   if [[ $DRY_RUN -eq 0 ]]; then
-    printf '%s\t%s\n' "$cli" "$dest_path" >> "$STATE_FILE"
+    local state_entry
+    state_entry="$(printf '%s\t%s' "$cli" "$dest_path")"
+    # Re-runs must not grow the state file with the same path over and over.
+    if ! grep -qxF -- "$state_entry" "$STATE_FILE" 2>/dev/null; then
+      printf '%s\n' "$state_entry" >> "$STATE_FILE"
+    fi
   fi
   say "  +  $cli: $entry"
 }
@@ -634,6 +643,149 @@ raise SystemExit(1)
 }
 
 # ---- installer ----------------------------------------------------------
+# ---- opencode guardrails -------------------------------------------------
+# ~/.config/opencode/opencode.jsonc is a single global document — there is no
+# include mechanism — so setup merges its managed keys into the existing file
+# rather than replacing it. `permissions` and `policies` are owned by this repo;
+# every other key (mcp, plugins, model, ...) is preserved. The file is backed up
+# before each merge so a bad parse never costs the user their config.
+opencode_config_apply() {
+  local file="$1" fragment="$2" mode="$3"
+  local verb="merged"
+  [[ "$mode" == "clear" ]] && verb="removed"
+
+  if [[ $DRY_RUN -eq 1 ]]; then
+    printf '  (dry-run) %s opencode guardrails in %q\n' "$verb" "$file"
+    return 0
+  fi
+  if [[ ! -f "$file" ]]; then
+    warn "opencode: no config at $file; guardrails not applied"
+    return 0
+  fi
+
+  # Date + PID: two setup runs in the same second must not overwrite each
+  # other's only copy of the pre-merge config.
+  local backup="$file.bak.$(date +%Y%m%d%H%M%S).$$"
+  cp -- "$file" "$backup"
+
+  if python3 - "$file" "$fragment" "$mode" <<'PY'
+import json, os, sys, tempfile
+
+path, fragment_path, mode = sys.argv[1:4]
+MANAGED = ("permissions", "policies")
+
+
+def strip_jsonc(text):
+    """Drop // and /* */ comments and trailing commas, ignoring string bodies."""
+    out, i, in_str, esc = [], 0, False, False
+    while i < len(text):
+        ch = text[i]
+        if in_str:
+            out.append(ch)
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            i += 1
+            continue
+        if ch == '"':
+            in_str = True
+            out.append(ch)
+            i += 1
+            continue
+        if text.startswith("//", i):
+            while i < len(text) and text[i] != "\n":
+                i += 1
+            continue
+        if text.startswith("/*", i):
+            i += 2
+            while i < len(text) and not text.startswith("*/", i):
+                i += 1
+            i += 2
+            continue
+        # Drop a trailing comma only outside strings: `",}"` in a value is data.
+        if ch == ",":
+            j = i + 1
+            while j < len(text) and text[j] in " \t\r\n":
+                j += 1
+            if j < len(text) and text[j] in "}]":
+                i += 1
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def load(p):
+    with open(p, encoding="utf-8") as fh:
+        return json.loads(strip_jsonc(fh.read()))
+
+
+doc = load(path)
+if mode == "merge":
+    frag = load(fragment_path)
+    for key in MANAGED:
+        value = frag.get(key) or []
+        if value:
+            doc[key] = value
+        else:
+            doc.pop(key, None)
+else:
+    for key in MANAGED:
+        doc.pop(key, None)
+
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".opencode-", suffix=".jsonc")
+with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    fh.write(
+        "// Managed by my-ai-workflow/bin/setup — `permissions` and `policies`\n"
+        "// come from integrations/opencode/config.jsonc. Everything else here is\n"
+        "// left alone. Edit the repo, not this file.\n"
+    )
+    json.dump(doc, fh, indent=2, ensure_ascii=False)
+    fh.write("\n")
+os.replace(tmp, path)
+PY
+  then
+    say "  ok  opencode: guardrails $verb (backup: $(basename "$backup"))"
+  else
+    warn "opencode: failed to apply guardrails; previous file kept at $backup"
+    warn "opencode: fix the JSON in $file, then re-run ./bin/setup --cli=opencode"
+    return 1
+  fi
+}
+
+do_opencode_guardrails_install() {
+  local base="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
+  [[ -d "$base" ]] || return 0
+
+  say ""
+  say "[opencode] guardrails -> $base"
+  install_file "$OPENCODE_GUARDRAILS_DIR/plugins/git-approval.ts" \
+    "$base/plugins/git-approval.ts" opencode "plugins/git-approval.ts"
+  install_file "$OPENCODE_GUARDRAILS_DIR/plugins/fs-guard.ts" \
+    "$base/plugins/fs-guard.ts" opencode "plugins/fs-guard.ts"
+  opencode_config_apply "$base/opencode.jsonc" "$OPENCODE_GUARDRAILS_DIR/config.jsonc" merge
+}
+
+# These two filenames are owned by setup, so they are removed by name. The
+# generic state-file loop cannot help here: it deliberately leaves copies alone
+# (they are "yours to edit"), which would strand the plugins in place while
+# their config rules disappeared — a half-uninstalled harness.
+do_opencode_guardrails_uninstall() {
+  local base="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
+  [[ -d "$base" ]] || return 0
+
+  local plugin
+  for plugin in git-approval.ts fs-guard.ts; do
+    [[ -e "$base/plugins/$plugin" ]] || continue
+    run rm -f -- "$base/plugins/$plugin"
+    say "  -  opencode: plugins/$plugin"
+  done
+  opencode_config_apply "$base/opencode.jsonc" "$OPENCODE_GUARDRAILS_DIR/config.jsonc" clear
+}
+
 do_install() {
   local cli skills_root agents_root
   while IFS= read -r cli; do
@@ -669,6 +821,10 @@ do_install() {
     fi
   done < <(detect_clis)
 
+  if cli_selected opencode && [[ -d "${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}" ]]; then
+    do_opencode_guardrails_install
+  fi
+
   do_superpowers_install
 
   if [[ $DRY_RUN -eq 1 ]]; then
@@ -682,6 +838,12 @@ do_install() {
 }
 
 do_uninstall() {
+  # Removed before the state loop: the loop skips copies by design, which would
+  # leave these plugins loaded after their config rules were cleared.
+  if cli_selected opencode && [[ -d "${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}" ]]; then
+    do_opencode_guardrails_uninstall
+  fi
+
   if [[ ! -s "$STATE_FILE" ]]; then
     say "Nothing to uninstall (no state file)."
   else

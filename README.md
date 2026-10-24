@@ -35,7 +35,8 @@ flavors wedged together, this repo keeps:
 │   ├── setup           # idempotent installer (also manages Superpowers plugins)
 │   └── check-secrets   # pre-commit secret scanner
 ├── integrations/
-│   └── superpowers.env # pinned upstream Superpowers source (public metadata only)
+│   ├── superpowers.env # pinned upstream Superpowers source (public metadata only)
+│   └── opencode/       # managed opencode guardrails (permissions + plugins)
 ├── docs/superpowers/   # global plugin design spec and implementation plan
 ├── skills/
 │   └── <skill-name>/
@@ -150,6 +151,46 @@ $EDITOR agents/<name>/opencode/<name>.md
 # ...etc.
 
 ./bin/setup
+```
+
+## opencode guardrails
+
+`integrations/opencode/` is the source of truth for the guardrails installed
+into `~/.config/opencode/`. `./bin/setup` copies the plugins and merges the
+managed `permissions`/`policies` keys into the global `opencode.jsonc`,
+backing it up first and leaving every other key (`mcp`, `plugins`, ...) alone.
+
+| Guardrail | Behaviour |
+| --------- | --------- |
+| `git commit` / `git push` | Prompts **every** time, even after "Allow always" |
+| `~/.gradle/**` | Denied outright — no prompt, no approval escape |
+| `~/.config/opencode/**` | Denied — the harness cannot rewrite its own guardrails |
+
+```bash
+./bin/setup --cli=opencode --dry-run   # preview
+./bin/setup --cli=opencode             # install
+```
+
+Two pieces are needed because neither alone is sufficient:
+
+- **`config.jsonc`** — `permissions` rules. A rule with `effect: "ask"` is
+  resolved once; choosing "Allow always" persists a project-scoped `allow` and
+  the rule never prompts again.
+- **`plugins/git-approval.ts`** — a `permission.evaluate` hook that runs *after*
+  configured rules and saved approvals and re-forces `ask`, so the prompt
+  returns on every command. It only ever escalates; a configured `deny` is
+  final.
+
+`plugins/fs-guard.ts` closes a gap in OpenCode's shell handling: the
+`external_directory` permission only inspects a command's *working directory*,
+so `cd ~/.gradle` is rejected while `unzip ~/.gradle/caches/.../x.jar` is not.
+The hook reads the command text instead.
+
+Both plugins are text heuristics, not sandboxes: a binary that opens a denied
+path from inside its own logic is invisible to them.
+
+```bash
+node --experimental-strip-types integrations/opencode/fs-guard.test.ts
 ```
 
 ## Useful scripts
