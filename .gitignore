@@ -8,3 +8,6 @@ Thumbs.db
 
 # Local install state for bin/setup
 .setup-state/
+
+# Local agent planning and review workspace
+.superpowers/
